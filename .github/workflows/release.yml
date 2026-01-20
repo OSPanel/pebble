@@ -1,152 +1,94 @@
-name: Build Release
-# Run on semver tags.
+name: Bundle Pebble Windows EXEs and Create Release
+
 on:
-  push:
-    tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      pebble_version:
+        description: "Pebble version tag (e.g. v2.9.0)"
+        required: true
+        default: "v2.9.0"
+
 permissions:
-  contents: read
-  packages: write # Allow docker/build-push-action to publish to GitHub Container Registry
-env:
-  DOCKER_PLATFORMS: linux/amd64, linux/arm64, windows/amd64
-  DOCKER_IMAGE_BASENAME: ghcr.io/${{ github.repository_owner }}
+  contents: write
+
 jobs:
-  go-build:
-    env:
-      CGO_ENABLED: 0
-      GOARCH: ${{ matrix.go-arch }}
-      GOOS: ${{ matrix.go-os }}
-      LDFLAGS: -s -w -X 'main.version=${{ github.ref_name }} (${{ github.sha }})'
-      OUTPUTDIR: /tmp/dist/${{ matrix.go-os }}/${{ matrix.go-arch }}
+  bundle-and-release:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        app:
-          - pebble
-          - pebble-challtestsrv
-        go-arch:
-          - amd64
-          - arm64
-        go-os:
-          - darwin
-          - linux
-          - windows
+
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
-        with:
-          check-latest: true
-          go-version-file: go.mod
-      - name: Build ${{ matrix.app }} for ${{ matrix.go-os }}/${{ matrix.go-arch }}
+      - name: Prepare variables
+        id: vars
+        shell: bash
         run: |
-          go build \
-            -ldflags="${LDFLAGS}" \
-            -o "${OUTPUTDIR}/" \
-            -trimpath \
-            -v \
-            ./cmd/${{ matrix.app }}
-      - name: Display ${{ matrix.app }} artifacts
-        run: tree /tmp/dist
-      - name: Store ${{ matrix.app }} artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.app }}-${{ matrix.go-os }}-${{ matrix.go-arch }}
-          path: /tmp/dist
-  docker-build:
-    needs:
-      - go-build
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        app:
-          - pebble
-          - pebble-challtestsrv
-    steps:
-      - uses: actions/checkout@v5
-      - name: Download ${{ matrix.app }} artifacts
-        uses: actions/download-artifact@v4
-        with:
-          merge-multiple: true
-          path: /tmp/dist
-          pattern: ${{ matrix.app }}-*-*
-      - name: Display ${{ matrix.app }} artifacts
-        run: tree /tmp/dist
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.DOCKER_IMAGE_BASENAME }}/${{ matrix.app }}
-          # generate Docker tags based on the following events/attributes
-          tags: |
-            type=semver,pattern={{major}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{version}}
-            type=sha
-            type=raw,value=latest
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and push ${{ github.repository }}/${{ matrix.app }} for ${{ env.DOCKER_PLATFORMS }}
-        uses: docker/build-push-action@v5
-        with:
-          build-args: APP=${{ matrix.app }}
-          build-contexts: dist-files=/tmp/dist
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          file: Dockerfile.release
-          labels: ${{ steps.meta.outputs.labels }}
-          platforms: ${{ env.DOCKER_PLATFORMS }}
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-  docker-version:
-    needs:
-      - docker-build
-    runs-on: ${{ matrix.docker-os }}
-    strategy:
-      matrix:
-        docker-os:
-          - ubuntu-latest
-          - windows-latest
-    steps:
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Display pebble version in container image
-        run: docker run ${{ env.DOCKER_IMAGE_BASENAME }}/pebble:latest -version
-  create-release:
-    needs:
-      - go-build
-    permissions:
-      contents: write # Allow creation of a release
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download build artifacts
-        uses: actions/download-artifact@v4
-      - name: Display build artifacts
-        run: tree .
-      - name: Create release
-        # https://cli.github.com/manual/gh_release_create
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: gh release create --repo ${{ github.repository }} --generate-notes --verify-tag ${GITHUB_REF_NAME}
-      - name: Upload release files
-        # https://cli.github.com/manual/gh_release_upload
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+          set -euo pipefail
+          VER="${{ inputs.pebble_version }}"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "workdir=pebble_artifacts" >> "$GITHUB_OUTPUT"
+          echo "outzip=pebble-exes-${VER}.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Create working directory
+        shell: bash
         run: |
-          for artifact in *; do
-            tar czf ${artifact}.tar.gz ${artifact}
-            zip -r ${artifact}.zip ${artifact}
-            gh release upload ${{ github.ref_name }} ${artifact}.* \
-              --repo ${{ github.repository }};
-          done
+          set -euo pipefail
+          mkdir -p "${{ steps.vars.outputs.workdir }}"
+
+      - name: Download Pebble release zips
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="${{ steps.vars.outputs.version }}"
+          cd "${{ steps.vars.outputs.workdir }}"
+
+          URL1="https://github.com/letsencrypt/pebble/releases/download/${VER}/pebble-windows-amd64.zip"
+          URL2="https://github.com/letsencrypt/pebble/releases/download/${VER}/pebble-challtestsrv-windows-amd64.zip"
+
+          echo "Downloading:"
+          echo "  $URL1"
+          echo "  $URL2"
+
+          curl -fL --retry 3 --retry-delay 2 -o pebble-windows-amd64.zip "$URL1"
+          curl -fL --retry 3 --retry-delay 2 -o pebble-challtestsrv-windows-amd64.zip "$URL2"
+
+      - name: Unzip both archives into the same folder
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ steps.vars.outputs.workdir }}"
+
+          # Распаковка в текущую папку (одну и ту же)
+          unzip -o pebble-windows-amd64.zip
+          unzip -o pebble-challtestsrv-windows-amd64.zip
+
+      - name: Collect all .exe files and create one zip
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ steps.vars.outputs.workdir }}"
+
+          # Находим exe рекурсивно
+          mapfile -d '' EXES < <(find . -type f -iname '*.exe' -print0)
+
+          if [ "${#EXES[@]}" -eq 0 ]; then
+            echo "No .exe files found after unzip."
+            exit 1
+          fi
+
+          echo "Found ${#EXES[@]} exe files:"
+          printf ' - %s\n' "${EXES[@]}"
+
+          # Пакуем только exe (с сохранением относительных путей)
+          zip -9 -r "../${{ steps.vars.outputs.outzip }}" "${EXES[@]}"
+
+      - name: Create GitHub Release and upload zip
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.vars.outputs.version }}
+          name: Pebble Windows EXEs bundle (${{ steps.vars.outputs.version }})
+          body: |
+            Автоматически собрано из релизных архивов Pebble:
+            - pebble-windows-amd64.zip
+            - pebble-challtestsrv-windows-amd64.zip
+
+            Версия: `${{ steps.vars.outputs.version }}`
+          files: |
+            ${{ steps.vars.outputs.outzip }}
