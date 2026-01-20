@@ -1,4 +1,4 @@
-name: Bundle Pebble Windows EXEs and Create Release
+name: Bundle Pebble Windows EXEs (flat) and Create Release
 
 on:
   workflow_dispatch:
@@ -42,10 +42,6 @@ jobs:
           URL1="https://github.com/letsencrypt/pebble/releases/download/${VER}/pebble-windows-amd64.zip"
           URL2="https://github.com/letsencrypt/pebble/releases/download/${VER}/pebble-challtestsrv-windows-amd64.zip"
 
-          echo "Downloading:"
-          echo "  $URL1"
-          echo "  $URL2"
-
           curl -fL --retry 3 --retry-delay 2 -o pebble-windows-amd64.zip "$URL1"
           curl -fL --retry 3 --retry-delay 2 -o pebble-challtestsrv-windows-amd64.zip "$URL2"
 
@@ -54,16 +50,16 @@ jobs:
         run: |
           set -euo pipefail
           cd "${{ steps.vars.outputs.workdir }}"
-
-          # Распаковка в текущую папку (одну и ту же)
           unzip -o pebble-windows-amd64.zip
           unzip -o pebble-challtestsrv-windows-amd64.zip
 
-      - name: Collect all .exe files and create one zip
+      - name: Flatten all .exe into one folder (no subdirs)
         shell: bash
         run: |
           set -euo pipefail
           cd "${{ steps.vars.outputs.workdir }}"
+
+          mkdir -p flat
 
           # Находим exe рекурсивно
           mapfile -d '' EXES < <(find . -type f -iname '*.exe' -print0)
@@ -76,8 +72,28 @@ jobs:
           echo "Found ${#EXES[@]} exe files:"
           printf ' - %s\n' "${EXES[@]}"
 
-          # Пакуем только exe (с сохранением относительных путей)
-          zip -9 -r "../${{ steps.vars.outputs.outzip }}" "${EXES[@]}"
+          for f in "${EXES[@]}"; do
+            base="$(basename "$f")"
+
+            # если имя уже занято — добавим "хвост" из пути
+            if [ -e "flat/$base" ]; then
+              # путь -> безопасное имя: ./a/b/c.exe => a-b-c.exe
+              safe="$(echo "$f" | sed -E 's|^\./||; s|/|-|g')"
+              safe="${safe%.*}.exe"
+              cp -f "$f" "flat/$safe"
+              echo "Name conflict: $base -> $safe"
+            else
+              cp -f "$f" "flat/$base"
+            fi
+          done
+
+      - name: Create zip with EXEs in root
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ steps.vars.outputs.workdir }}/flat"
+          zip -9 "../${{ steps.vars.outputs.outzip }}" *.exe
+          mv "../${{ steps.vars.outputs.outzip }}" "../../${{ steps.vars.outputs.outzip }}"
 
       - name: Create GitHub Release and upload zip
         uses: softprops/action-gh-release@v2
@@ -85,10 +101,9 @@ jobs:
           tag_name: ${{ steps.vars.outputs.version }}
           name: Pebble Windows EXEs bundle (${{ steps.vars.outputs.version }})
           body: |
-            Автоматически собрано из релизных архивов Pebble:
+            ZIP содержит все `.exe` в корне (без подпапок).
+            Источники:
             - pebble-windows-amd64.zip
             - pebble-challtestsrv-windows-amd64.zip
-
-            Версия: `${{ steps.vars.outputs.version }}`
           files: |
             ${{ steps.vars.outputs.outzip }}
